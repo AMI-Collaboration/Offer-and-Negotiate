@@ -1,1 +1,42 @@
-
+[
+  {
+    "id": "task_001",
+    "description": "Five guests will arrive in 30 minutes. Clean and prepare the house, prioritizing the areas where the guests are expected to spend the most time."
+  },
+  {
+    "id": "task_002",
+    "description": "A power outage is expected in 15 minutes. Inspect each room and prioritize the necessary actions to prepare the entire house for the outage, completing them within 15 minutes."
+  },
+  {
+    "id": "task_003",
+    "description": "There is a strange smell somewhere in the house. Within 30 minutes, inspect the house, determine which areas need attention, and take the necessary actions to address the issue."
+  },
+  {
+    "id": "task_004",
+    "description": "A five-year-old child will take a bath in 20 minutes. Prepare and check the bathroom for safety while gathering the necessary items from other rooms, completing all preparations within 20 minutes."
+  },
+  {
+    "id": "task_005",
+    "description": "An earthquake has just occurred. Inspect each room for potential hazards, fire, or gas leaks, take the necessary actions to secure the house, and prepare safe evacuation routes."
+  },
+  {
+    "id": "task_006",
+    "description": "Before leaving the house for two weeks, organize food waste, trash, and laundry in each area, inspect the water, gas, and electricity, and check the windows and doors. Complete all preparations within 30 minutes, leaving the entire house safe and tidy."
+  },
+  {
+    "id": "task_007",
+    "description": "Heavy rainfall is expected tonight. Inspect the different areas of the house and prioritize the necessary actions to prepare for potential flooding and power outages, completing all preparations within 30 minutes."
+  },
+  {
+    "id": "task_008",
+    "description": "I need to isolate in my room. Prepare the isolation space while gathering the necessary items from other areas of the house, making the room ready for use within 20 minutes."
+  },
+  {
+    "id": "task_009",
+    "description": "A remote meeting will start in the bedroom in 20 minutes. Organize the meeting space while gathering the necessary documents and items from other rooms, completing all preparations within 20 minutes."
+  },
+  {
+    "id": "task_010",
+    "description": "I will start exercising in 30 minutes. Prepare the workout area and necessary equipment while also preparing the environment and items needed to shower and have a protein supplement afterward, completing all preparations within 30 minutes."
+  }
+]
