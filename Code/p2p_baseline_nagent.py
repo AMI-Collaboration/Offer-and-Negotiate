@@ -63,13 +63,14 @@ Describe the following in natural language:
 Be specific about visible objects. Keep it concise."""
 
 
-def _observe_all_n(images: List[str], agent_ids: List[str], task: str) -> Dict[str, str]:
+def _observe_all_n(images: List[str], agent_ids: List[str], task: str, verbose: str = "full") -> Dict[str, str]:
     prompt = _build_observation_prompt(task)
     results = _run_parallel([(img, prompt, False) for img in images])
     obs = {}
     for aid, (text, _) in zip(agent_ids, results):
         obs[aid] = text
-        _log(f"{aid} OBSERVATION", text)
+        if verbose == "full":
+            _log(f"{aid} OBSERVATION", text)
     return obs
 
 
@@ -120,6 +121,7 @@ Return ONLY valid JSON inside <JSON> tags, with one key per agent_id listed abov
 def run_centralized_n(
     task_id: Optional[str] = None, images: Optional[List[str]] = None,
     agent_ids: Optional[List[str]] = None, task: Optional[str] = None,
+    verbose: str = "full",
 ) -> Dict:
     n_agents = len(images)
     agent_ids = agent_ids or make_agent_ids(n_agents)
@@ -127,12 +129,13 @@ def run_centralized_n(
     task_id = task_id or "custom_task"
 
     _banner(f"CENTRALIZED (N={n_agents}) - STEP 1..N: OBSERVATION (자연어, 구조화 없음)")
-    obs = _observe_all_n(images, agent_ids, task_str)
+    obs = _observe_all_n(images, agent_ids, task_str, verbose=verbose)
 
     _banner(f"CENTRALIZED (N={n_agents}) - STEP N+1: JOINT PLAN (단일 플래너, handoff 없음)")
     prompt = _build_centralized_plan_prompt_n(task_str, obs, agent_ids)
     raw, _ = p2p_vlm.run_vlm(images[0], prompt)  # 단일 플래너 — 원본과 동일하게 대표 이미지 1장만 사용
-    _log("CENTRALIZED RAW PLAN", raw)
+    if verbose == "full":
+        _log("CENTRALIZED RAW PLAN", raw)
 
     data = extract_json(raw)
     if not isinstance(data, dict):
@@ -224,6 +227,7 @@ def _rule_based_merge_n(steps_by_agent: Dict[str, List[Dict]], agent_ids: List[s
 def run_independent_n(
     task_id: Optional[str] = None, images: Optional[List[str]] = None,
     agent_ids: Optional[List[str]] = None, task: Optional[str] = None,
+    verbose: str = "full",
 ) -> Dict:
     n_agents = len(images)
     agent_ids = agent_ids or make_agent_ids(n_agents)
@@ -231,13 +235,14 @@ def run_independent_n(
     task_id = task_id or "custom_task"
 
     _banner(f"INDEPENDENT (N={n_agents}) - STEP 1..N: OBSERVATION (자연어, 구조화 없음)")
-    obs = _observe_all_n(images, agent_ids, task_str)
+    obs = _observe_all_n(images, agent_ids, task_str, verbose=verbose)
 
     _banner(f"INDEPENDENT (N={n_agents}) - STEP N+1: LOCAL PLANNING (상대방 모름)")
     prompts = [_build_independent_plan_prompt(task_str, obs[aid]) for aid in agent_ids]
     results = _run_parallel(list(zip(images, prompts, [False] * n_agents)))
-    for aid, (raw, _) in zip(agent_ids, results):
-        _log(f"{aid} RAW PLAN", raw)
+    if verbose == "full":
+        for aid, (raw, _) in zip(agent_ids, results):
+            _log(f"{aid} RAW PLAN", raw)
 
     def _parse(raw: str, agent_id: str, idx: int) -> List[Dict]:
         data = extract_json(raw)
@@ -304,6 +309,7 @@ def run_baseline_comparison_n(
     task_id: Optional[str] = None,
     image_sets: Optional[List[List[str]]] = None,
     task: Optional[str] = None,
+    verbose: str = "full",
 ) -> pd.DataFrame:
     """
     Args:
@@ -312,6 +318,8 @@ def run_baseline_comparison_n(
                      세트마다 이미지 개수(N)가 곧 agent 수가 된다 (N=2든 N=4든 그대로 지원).
         task       : task 설명을 문자열로 직접 전달. 지정하면 tasks.json 조회 없이 바로 이 텍스트를 쓴다.
                      예: run_baseline_comparison_n(task="...", image_sets=[[...]])
+        verbose    : "full"(기본) - observation/raw plan 원문까지 다 콘솔에 출력.
+                     "summary" - 단계 배너와 최종 플랜만 출력.
     """
     if not task and not task_id:
         raise ValueError("task 또는 task_id 중 하나는 지정해주세요.")
@@ -337,7 +345,7 @@ def run_baseline_comparison_n(
             _banner(f"BASELINE - {method_name} (N={n_agents})")
             tracker.start()
             try:
-                result = run_fn(task_id=task_id, images=images, task=task)
+                result = run_fn(task_id=task_id, images=images, task=task, verbose=verbose)
             except Exception as e:
                 print(f"  [ERROR] {method_name}: {e}")
                 tracker.stop()
