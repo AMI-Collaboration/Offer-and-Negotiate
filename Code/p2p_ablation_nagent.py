@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -56,17 +56,24 @@ def _save_result(result: Dict, condition: str, pt: float, tc: int, run_idx: int)
 
 
 def run_ablation_study_n(
-    task_id: str,
-    image_sets: List[List[str]],
-    task: str = None,
+    task_id: Optional[str] = None,
+    image_sets: Optional[List[List[str]]] = None,
+    task: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Args:
-        task_id    : 실험 태스크 ID (tasks.json에 등록된 것을 쓰거나, task= 로 직접 텍스트 지정 가능)
+        task_id    : tasks.json에 등록된 task를 조회할 때 사용. task=를 직접 넘기면 무시됨.
         image_sets : [[img_A, img_B, ...], ...] — 태스크당 N장짜리 이미지 세트 리스트.
                      세트마다 이미지 개수(N)가 곧 agent 수. N=2/N=4 섞어서 넣어도 됨.
-        task       : task 설명을 문자열로 직접 줄 경우 (tasks.json 조회 생략).
+        task       : task 설명을 문자열로 직접 전달. 지정하면 tasks.json 조회 없이 바로 이 텍스트를 쓴다.
+                     예: run_ablation_study_n(task="...", image_sets=[[...]])
     """
+    if not task and not task_id:
+        raise ValueError("task 또는 task_id 중 하나는 지정해주세요.")
+    if not image_sets:
+        raise ValueError("image_sets를 지정해주세요. 예: image_sets=[[img1,img2,img3,img4], ...]")
+    task_id = task_id or "custom_task"
+
     SEP = "=" * 68
     print(SEP)
     print(f"  ABLATION STUDY (N-agent)  |  task={task_id}  |  runs={len(image_sets)}")
