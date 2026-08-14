@@ -117,10 +117,14 @@ Generate a plan for ALL {len(agent_ids)} agents. Each agent works ONLY in their 
 Return ONLY valid JSON inside <JSON> tags, with one key per agent_id listed above."""
 
 
-def run_centralized_n(task_id: str, images: List[str], agent_ids: Optional[List[str]] = None) -> Dict:
+def run_centralized_n(
+    task_id: Optional[str] = None, images: Optional[List[str]] = None,
+    agent_ids: Optional[List[str]] = None, task: Optional[str] = None,
+) -> Dict:
     n_agents = len(images)
     agent_ids = agent_ids or make_agent_ids(n_agents)
-    task_str = get_task(task_id)
+    task_str = task or get_task(task_id)
+    task_id = task_id or "custom_task"
 
     _banner(f"CENTRALIZED (N={n_agents}) - STEP 1..N: OBSERVATION (자연어, 구조화 없음)")
     obs = _observe_all_n(images, agent_ids, task_str)
@@ -217,10 +221,14 @@ def _rule_based_merge_n(steps_by_agent: Dict[str, List[Dict]], agent_ids: List[s
     return merged
 
 
-def run_independent_n(task_id: str, images: List[str], agent_ids: Optional[List[str]] = None) -> Dict:
+def run_independent_n(
+    task_id: Optional[str] = None, images: Optional[List[str]] = None,
+    agent_ids: Optional[List[str]] = None, task: Optional[str] = None,
+) -> Dict:
     n_agents = len(images)
     agent_ids = agent_ids or make_agent_ids(n_agents)
-    task_str = get_task(task_id)
+    task_str = task or get_task(task_id)
+    task_id = task_id or "custom_task"
 
     _banner(f"INDEPENDENT (N={n_agents}) - STEP 1..N: OBSERVATION (자연어, 구조화 없음)")
     obs = _observe_all_n(images, agent_ids, task_str)
@@ -293,15 +301,22 @@ def _save_result(result: Dict, pt: float, tc: int, run_idx: int) -> None:
 
 
 def run_baseline_comparison_n(
-    task_id: str,
-    image_sets: List[List[str]],
+    task_id: Optional[str] = None,
+    image_sets: Optional[List[List[str]]] = None,
+    task: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Args:
-        task_id    : 실험 태스크 ID
+        task_id    : tasks.json에 등록된 task를 조회할 때 사용. task=를 직접 넘기면 무시됨.
         image_sets : [[img_A, img_B, ...], ...] — 태스크당 N장짜리 이미지 세트 리스트.
                      세트마다 이미지 개수(N)가 곧 agent 수가 된다 (N=2든 N=4든 그대로 지원).
+        task       : task 설명을 문자열로 직접 전달. 지정하면 tasks.json 조회 없이 바로 이 텍스트를 쓴다.
+                     예: run_baseline_comparison_n(task="...", image_sets=[[...]])
     """
+    if not task and not task_id:
+        raise ValueError("task 또는 task_id 중 하나는 지정해주세요.")
+    task_id = task_id or "custom_task"
+
     conditions = [("Centralized", run_centralized_n), ("Independent", run_independent_n)]
 
     SEP = "=" * 68
@@ -322,7 +337,7 @@ def run_baseline_comparison_n(
             _banner(f"BASELINE - {method_name} (N={n_agents})")
             tracker.start()
             try:
-                result = run_fn(task_id, images)
+                result = run_fn(task_id=task_id, images=images, task=task)
             except Exception as e:
                 print(f"  [ERROR] {method_name}: {e}")
                 tracker.stop()
