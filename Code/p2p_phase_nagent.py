@@ -201,6 +201,15 @@ def _normalize_pass_n(steps: List[PlanStep], agent_ids: List[str]) -> List[PlanS
     _CARRY = {"carry", "bring", "deliver", "transport", "move", "transfer"}
     _RECV = {"place", "set", "organize", "receive", "pick", "get", "put", "sort"}
 
+    # 원본 NON_PASSABLE_KW(p2p_config.py)에는 "table" 같은 가구 단어가 없어서
+    # "carry table to..." 같은 물리적으로 불가능한 PASS를 못 걸러낸다. 원본 파일은
+    # 안 건드리고, N-agent 쪽에서만 가구/고정 설비 단어를 추가로 검사한다.
+    _EXTRA_NON_PASSABLE_KW = {
+        "table", "chair", "bed", "couch", "sofa", "desk", "cabinet", "dresser",
+        "wardrobe", "bathtub", "tub", "toilet", "stove", "fridge",
+        "refrigerator", "oven", "dishwasher", "tv", "television",
+    }
+
     for s in steps:
         if s.handoff_type != "PASS":
             continue
@@ -210,6 +219,13 @@ def _normalize_pass_n(steps: List[PlanStep], agent_ids: List[str]) -> List[PlanS
         if not s.target_agent or s.target_agent not in agent_ids:
             s.handoff_type = None; s.target_agent = None; continue
         if first in _RECV:
+            s.handoff_type = None; s.target_agent = None; continue
+        # 가구/고정 설비(테이블, 싱크대 등)처럼 물리적으로 들고 옮길 수 없는 걸
+        # PASS로 만든 경우 걸러낸다. can_provide 단계에서 한 번 걸러지긴 하지만,
+        # Coordinate 라운드에서 VLM이 그 목록을 무시하고 새로 지어내는 경우가 있다.
+        if not _p2._is_passable(s.action) or (_kw(s.action) & _EXTRA_NON_PASSABLE_KW):
+            print(f"  [NORMALIZE] {s.agent_id} step{s.step_id}: '{s.action[:50]}' -> "
+                  f"물리적으로 옮길 수 없는 항목으로 판단, PASS 취소")
             s.handoff_type = None; s.target_agent = None; continue
         if not s.depends_on:
             prev_steps = [p for p in steps if p.step_id < s.step_id and not p.handoff_type]
@@ -363,6 +379,11 @@ def _ensure_pass_n(
     _EXTRA_STOPWORDS_N = {
         "of", "from", "into", "onto", "by", "as", "for", "this", "that",
         "these", "those", "then", "than", "also", "your", "their", "its",
+        # 거의 모든 정리 액션에 붙는 흔한 부사/형용사 — 이것만 겹쳐도 서로 다른
+        # 액션을 같은 걸로 착각하는 원인이 됨 (예: "neatly" 하나만 겹쳐서
+        # 엉뚱한 액션이 receive 지점으로 잘못 링크된 사례)
+        "neatly", "properly", "carefully", "nicely", "safely", "thoroughly",
+        "quickly", "gently", "well",
     }
 
     def _mkw(text: str) -> Set[str]:
@@ -418,7 +439,7 @@ def _ensure_pass_n(
 
             targets = [
                 s for s in receiver_plan.steps
-                if not s.handoff_type and pkw & _mkw(s.action) and _is_recv_candidate(s)
+                if not s.handoff_type and len(pkw & _mkw(s.action)) >= 2 and _is_recv_candidate(s)
             ]
             if targets:
                 for rs in targets:
@@ -466,7 +487,7 @@ def _ensure_pass_n(
             pkw = _mkw(s.action)
             targets = [
                 rs for rs in receiver_plan.steps
-                if not rs.handoff_type and pkw & _mkw(rs.action) and _is_recv_candidate(rs)
+                if not rs.handoff_type and len(pkw & _mkw(rs.action)) >= 2 and _is_recv_candidate(rs)
             ]
             if targets:
                 for rs in targets:
@@ -981,6 +1002,42 @@ def repair_orphan_pass_n(
             all_ids.add(recv_sid)
             print(f"  [REPAIR] {target}: receive step{recv_sid} re-added for orphaned "
                   f"PASS step{sid} from {sender}")
+
+    return cur_steps
+
+
+def strip_phantom_receives_n(
+    cur_steps: Dict[str, List[Dict]], agent_ids: List[str],
+) -> Dict[str, List[Dict]]:
+    """반대 방향의 안전장치: VLM이 특정 다른 agent를 지목해서 "receive/get/collect ...
+    from agent_X" 같은 스텝을 스스로 만들었는데, 정작 agent_X(혹은 그 누구도) 그걸
+    보내는 실제 PASS step이 어디에도 없는 경우("phantom receive")를 찾아 제거한다.
+    target_agent가 있거나 액션 텍스트에 다른 agent_id가 명시적으로 언급된 receive류
+    동사 스텝만 검사 대상으로 삼는다 — 그냥 "take milk from fridge" 같은 방 안에서
+    끝나는 일반 액션까지 잘못 지우지 않기 위해서다."""
+    _RECV_VERBS = {"receive", "accept", "collect", "get", "take", "pick"}
+    all_steps = [s for aid in agent_ids for s in cur_steps[aid]]
+    pass_ids_all = {s["step_id"] for s in all_steps if s.get("handoff_type") == "PASS"}
+
+    for aid in agent_ids:
+        kept: List[Dict] = []
+        for s in cur_steps[aid]:
+            if s.get("handoff_type") == "PASS":
+                kept.append(s)
+                continue
+            action = s.get("action", "")
+            fw = action.lower().split()[0] if action.strip() else ""
+            mentions_peer = bool(s.get("target_agent")) or bool(re.search(r"agent_[A-Za-z]", action))
+            if fw not in _RECV_VERBS or not mentions_peer:
+                kept.append(s)
+                continue
+            deps = set(s.get("depends_on", []))
+            if deps & pass_ids_all:
+                kept.append(s)  # 실제 PASS와 연결돼 있음 -> 정상
+                continue
+            print(f"  [PHANTOM] {aid} step{s.get('step_id')} '{action[:55]}' - "
+                  f"receive를 기대하지만 그걸 보내는 실제 PASS가 어디에도 없음 -> 제거")
+        cur_steps[aid] = kept
 
     return cur_steps
 
