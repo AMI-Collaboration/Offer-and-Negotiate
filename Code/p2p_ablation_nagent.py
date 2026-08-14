@@ -59,6 +59,7 @@ def run_ablation_study_n(
     task_id: Optional[str] = None,
     image_sets: Optional[List[List[str]]] = None,
     task: Optional[str] = None,
+    verbose: str = "full",
 ) -> pd.DataFrame:
     """
     Args:
@@ -67,6 +68,8 @@ def run_ablation_study_n(
                      세트마다 이미지 개수(N)가 곧 agent 수. N=2/N=4 섞어서 넣어도 됨.
         task       : task 설명을 문자열로 직접 전달. 지정하면 tasks.json 조회 없이 바로 이 텍스트를 쓴다.
                      예: run_ablation_study_n(task="...", image_sets=[[...]])
+        verbose    : "full"(기본) - run_n을 직접 호출했을 때처럼 Offer/Draft/Coordinate
+                     원문까지 다 콘솔에 출력. "summary" - 단계 배너와 최종 플랜만 출력.
     """
     if not task and not task_id:
         raise ValueError("task 또는 task_id 중 하나는 지정해주세요.")
@@ -97,7 +100,7 @@ def run_ablation_study_n(
                 result = run_n(
                     task_id=task_id, task=task, images=images,
                     label=f"{condition} (N={n_agents})",
-                    verbose="summary",
+                    verbose=verbose,
                     **flags,
                 )
             except Exception as e:
