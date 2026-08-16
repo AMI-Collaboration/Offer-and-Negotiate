@@ -97,7 +97,7 @@ def run(
 
     # ── OBSERVATION: offer + draft (VLM × 2) ─────────────────────────────────
     offer_a, offer_b, draft_a, draft_b = observe_and_draft(
-        img_a, img_b, task, verbose=verbose,
+        img_a, img_b, task, use_offer=use_offer, verbose=verbose,
     )
 
     # ── COORDINATION: mutual awareness final plan (VLM × 2) ──────────────────
