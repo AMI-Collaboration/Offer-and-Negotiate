@@ -16,8 +16,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from concurrent.futures import ThreadPoolExecutor as _TPE
+from concurrent.futures import ProcessPoolExecutor as _PPE
 from itertools import combinations
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -75,47 +77,57 @@ def phase1_offer_n(
 # PHASE 2: LOCAL PLANNING (peer-aware, N-agent)
 # ══════════════════════════════════════════════════════════════════════════
 
-def _peer_summary(offer: Offer) -> Dict:
-    """전체 draft plan이 아니라 offer 요약만 넘김 — N=4에서 프롬프트 폭발 방지."""
+def _peer_summary(offer: Offer, use_offer: bool = True) -> Dict:
+    """전체 draft plan이 아니라 offer 요약만 넘김 — N=4에서 프롬프트 폭발 방지.
+
+    use_offer=False면 can_provide/need_from_other(협업 유도 필드)를 아예 빼고
+    agent_id/room_type만 남긴다. 즉 "다른 agent가 존재하고 어디 있는지는 알지만
+    뭘 줄 수 있고 뭘 필요로 하는지는 모른다"는 ablation 조건을 실제로 구현한다.
+    """
+    if use_offer:
+        return {
+            "agent_id": offer.agent_id,
+            "room_type": offer.room_type,
+            "can_provide": offer.can_provide,
+            "need_from_other": offer.need_from_other,
+        }
     return {
         "agent_id": offer.agent_id,
         "room_type": offer.room_type,
-        "can_provide": offer.can_provide,
-        "need_from_other": offer.need_from_other,
     }
 
 
-def _build_draft_prompt_n(my: Offer, others: List[Offer], task: str) -> str:
+def _build_draft_prompt_n(
+    my: Offer, others: List[Offer], task: str, use_offer: bool = True,
+) -> str:
     """DRAFT 라운드 — 원본 _build_phase2_prompt()와 동일하게, 아직 다른 agent의
-    draft plan이 존재하지 않는 시점이라 offer 요약만 보고 초안을 만든다."""
-    peers = json.dumps([_peer_summary(o) for o in others], ensure_ascii=False, indent=2)
+    draft plan이 존재하지 않는 시점이라 offer 요약만 보고 초안을 만든다.
+
+    use_offer=False("w/o Offer" ablation)는 정확히 "Offer Exchange"만 끈다
+    (Method 3.1.1). 즉:
+      - 자기 자신의 Offer(can_do/can_provide/need_from_other)는 그대로 안다
+        — 이건 "선언/교환"이 아니라 자기 능력에 대한 자기 인식이므로 ablation
+        대상이 아니다.
+      - 다른 agent에 대한 정보(존재 여부, 능력, room)는 전혀 모른다 — Offer를
+        서로 교환하지 않았으므로.
+    Draft Plan Exchange(Method 3.1.2, Coordinate 라운드)는 이 플래그와 무관하게
+    항상 그대로 일어난다 — Offer Exchange와 Draft Plan Exchange는 서로 다른
+    두 개의 exchange 이벤트이므로, "Offer Exchange"만 격리해서 그 기여도를
+    측정하기 위함이다.
+    """
     other_ids = [o.agent_id for o in others]
-    return f"""You are the {my.room_type} agent ({my.agent_id}).
-Global task: "{task}"
 
-There are {len(others) + 1} agents total, each in a separate room, coordinating this task together.
-
-YOUR OFFER:
-- can_do: {json.dumps(my.can_do, ensure_ascii=False)}
-- can_provide (items you can PASS to others): {json.dumps(my.can_provide, ensure_ascii=False)}
-- need_from_other: {json.dumps(my.need_from_other, ensure_ascii=False)}
-
-OTHER AGENTS (summary only — you don't know their draft plans yet):
-{peers}
-
-{_p2._P2_HANDOFF_RULES}
-
-Generate a DRAFT local plan. Think step by step:
-1. What does the global task require from YOUR room specifically?
-2. Looking at the other agents' can_provide/need_from_other above, is there something you
+    if use_offer:
+        peers = json.dumps([_peer_summary(o, use_offer) for o in others], ensure_ascii=False, indent=2)
+        peer_block = f"""OTHER AGENTS (summary only — you don't know their draft plans yet):
+{peers}"""
+        collab_step = f"""2. Looking at the other agents' can_provide/need_from_other above, is there something you
    should PASS to a SPECIFIC agent, or expect to RECEIVE from a specific agent?
-3. If you PASS or expect to receive, target_agent MUST be exactly one of: {other_ids}
-
-PLANNING RULES:
-1. Steps ONLY in your room ({my.room_type}), using ONLY visible objects.
-2. Generate 4-6 steps over 0-25 minutes. NO repeated actions.
-3. Prioritize actions that DIRECTLY contribute to the global task.
-4. HANDOFF - if can_provide is NOT empty and a specific other agent needs it:
+3. If you PASS or expect to receive, target_agent MUST be exactly one of: {other_ids}"""
+        handoff_rules = f"""
+{_p2._P2_HANDOFF_RULES}
+"""
+        planning_rules_45 = f"""4. HANDOFF - if can_provide is NOT empty and a specific other agent needs it:
    - Only do this if the item is genuinely relevant to something in that agent's
      need_from_other — don't hand off an item just because you happen to have one spare.
    - Prepare the item first (1-2 prep steps)
@@ -124,7 +136,41 @@ PLANNING RULES:
    - PASS step must have depends_on=[prep step ids] (your OWN step_ids only)
 5. INFORM - if you want to notify a specific agent of completion:
    - "notify [target_agent]: [what is ready]"
-   - handoff_type="INFORM", target_agent=[one of {other_ids}]
+   - handoff_type="INFORM", target_agent=[one of {other_ids}]"""
+    else:
+        peer_block = ("OTHER AGENTS: no information shared (Offer Exchange disabled). You do not "
+                       "know how many other agents exist, where they are, or what they can do — "
+                       "even though you know your OWN capabilities below.")
+        collab_step = ("2. You have NO information about any other agent (no Offer was exchanged). "
+                        "Do not add a PASS or INFORM step — you have no valid target_agent to send it to.")
+        handoff_rules = ""
+        planning_rules_45 = ("4. Do NOT set handoff_type or target_agent — leave them null. You "
+                              "cannot coordinate a handoff without knowing who else exists.")
+
+    # can_do/can_provide/need_from_other는 use_offer와 무관하게 항상 자기 자신의
+    # 것을 안다 — ablation 대상은 "다른 agent에 대한 정보를 아는가"이지
+    # "자기 자신의 능력을 아는가"가 아니다.
+    my_offer_block = f"""YOUR OFFER:
+- can_do: {json.dumps(my.can_do, ensure_ascii=False)}
+- can_provide (items you can PASS to others): {json.dumps(my.can_provide, ensure_ascii=False)}
+- need_from_other: {json.dumps(my.need_from_other, ensure_ascii=False)}"""
+
+    return f"""You are the {my.room_type} agent ({my.agent_id}).
+Global task: "{task}"
+
+{my_offer_block}
+
+{peer_block}
+{handoff_rules}
+Generate a DRAFT local plan. Think step by step:
+1. What does the global task require from YOUR room specifically?
+{collab_step}
+
+PLANNING RULES:
+1. Steps ONLY in your room ({my.room_type}), using ONLY visible objects.
+2. Generate 4-6 steps over 0-25 minutes. NO repeated actions.
+3. Prioritize actions that DIRECTLY contribute to the global task.
+{planning_rules_45}
 6. depends_on must ONLY reference YOUR OWN step_ids. Never another agent's step_ids.
 7. Return ONLY valid JSON inside <JSON> tags.
 
@@ -141,17 +187,45 @@ PLANNING RULES:
 
 def _build_coordinate_prompt_n(
     my: Offer, my_draft_json: str, others: List[Offer], other_drafts_json: Dict[str, str], task: str,
+    use_offer: bool = True,
 ) -> str:
     """COORDINATE 라운드 — 원본 coordinate()의 _build_coord_prompt()를 N-agent로 일반화.
-    이제 상대방의 offer 요약뿐 아니라 '전체 draft plan'을 실제로 broadcast 받아서 본다.
+    상대방의 offer 요약뿐 아니라 '전체 draft plan'을 실제로 broadcast 받아서 본다.
     이래야 PASS를 낼 때 상대방이 이미 뭘 준비해뒀는지/뭘 필요로 하는지 구체적으로 보고
-    receive 지점을 정확히 맞출 수 있다."""
+    receive 지점을 정확히 맞출 수 있다.
+
+    이 함수는 use_offer와 무관하게 항상 동일하게 동작한다. Method 3.1.1(Offer
+    Exchange)과 3.1.2(Draft Plan Exchange = Mutual-Aware Coordination)는 서로
+    다른 두 개의 exchange 이벤트이며, "w/o Offer" ablation은 3.1.1만 격리해서
+    끈다. 즉 Draft 라운드에서 다른 agent의 Offer를 못 봤더라도, Coordinate
+    라운드에서는 항상 다른 agent들의 Draft Plan을 broadcast받는다 — 이렇게
+    해야 "초기 능력 선언(Offer)이 그 이후 결과에 미치는 영향"만 단일 변수로
+    분리해서 측정할 수 있다. use_offer 파라미터는 호출부 시그니처 일관성을
+    위해 남겨두지만 이 함수 내부에서는 사용하지 않는다.
+    """
     other_ids = [o.agent_id for o in others]
+
     others_block = "\n\n".join(
         f"AGENT {o.agent_id} ({o.room_type}) DRAFT PLAN:\n{other_drafts_json[o.agent_id]}"
         for o in others
     )
+    others_section = f"""OTHER AGENTS' DRAFT PLANS (broadcast — read these to decide exactly who
+to PASS to / RECEIVE from, and at which of their steps):
+{others_block}"""
     passable = [p for p in my.can_provide if _p2._is_passable(p)]
+    offer_block = f"""YOUR OFFER:
+- can_provide (items you can PASS): {json.dumps(passable, ensure_ascii=False)}
+- need_from_other: {json.dumps(my.need_from_other, ensure_ascii=False)}
+
+"""
+    rule1 = "1. Avoid redundancy with any other agent's plan shown above."
+    rule2 = """2. Add a PASS step if can_provide is not empty AND a specific other agent's
+   draft plan shows they actually need it."""
+    rule3 = """3. Add a RECEIVE step if another agent's draft plan shows a PASS step targeting
+   you — name what you're receiving and from whom."""
+    rule4 = f"4. target_agent MUST be exactly one of: {other_ids}"
+    rule5 = """5. IMPORTANT: depends_on must ONLY reference YOUR OWN step_ids. Never another
+   agent's step_ids (even though you can see their plans above)."""
 
     return f"""You are the {my.room_type} agent ({my.agent_id}).
 Global task: "{task}"
@@ -159,25 +233,16 @@ Global task: "{task}"
 YOUR DRAFT PLAN (improve this):
 {my_draft_json}
 
-OTHER AGENTS' DRAFT PLANS (broadcast — read these to decide exactly who
-to PASS to / RECEIVE from, and at which of their steps):
-{others_block}
+{others_section}
 
-YOUR OFFER:
-- can_provide (items you can PASS): {json.dumps(passable, ensure_ascii=False)}
-- need_from_other: {json.dumps(my.need_from_other, ensure_ascii=False)}
-
-{_p2._P2_HANDOFF_RULES}
+{offer_block}{_p2._P2_HANDOFF_RULES}
 
 Produce your FINAL local plan. Refine your draft:
-1. Avoid redundancy with any other agent's plan shown above.
-2. Add a PASS step if can_provide is not empty AND a specific other agent's
-   draft plan shows they actually need it.
-3. Add a RECEIVE step if another agent's draft plan shows a PASS step targeting
-   you — name what you're receiving and from whom.
-4. target_agent MUST be exactly one of: {other_ids}
-5. IMPORTANT: depends_on must ONLY reference YOUR OWN step_ids. Never another
-   agent's step_ids (even though you can see their plans above).
+{rule1}
+{rule2}
+{rule3}
+{rule4}
+{rule5}
 6. Generate 4-6 steps. Return ONLY valid JSON inside <JSON> tags.
 
 <JSON>
@@ -535,11 +600,15 @@ def phase2_local_plan_n(
     이렇게 해야 PASS를 낼 때 상대가 실제로 뭘 준비했는지/필요한지 보고 정확히
     맞춰서 PASS-RECEIVE를 걸 수 있다 (offer 요약만으론 정확도가 떨어졌음).
 
-    use_offer: 원본 coordinate()의 use_offer와 동일한 의미 — draft/coordinate 두
-        라운드 자체는 항상 수행되고, 이 플래그는 Round B 이후의 rule-based PASS
-        보정(_ensure_pass_n) 적용 여부만 결정한다.
-        True  -> rule-based 보정까지 적용 (기본, Full P2P)
-        False -> 보정 없이 VLM이 스스로 낸 PASS/receive만 사용 (ablation: w/o Offer)
+    use_offer: "Offer Exchange" ablation 플래그 (Method 3.1.1 전용).
+        True  -> Draft 라운드에서 다른 agent의 Offer 요약을 보고 계획 (기본, Full P2P)
+        False -> Draft 라운드에서 다른 agent에 대한 정보를 전혀 못 보고 완전히
+                 고립된 채로 초안을 세움 (자기 자신의 Offer는 그대로 앎).
+        Coordinate 라운드(Draft Plan Exchange, Method 3.1.2)는 이 플래그와
+        무관하게 항상 동일하게 동작한다 — 서로 다른 두 exchange 이벤트를
+        분리해서 Offer Exchange만의 기여도를 측정하기 위함이다. 규칙 기반
+        PASS 보정(_ensure_pass_n)도 이제 항상 실행된다 (Coordinate가 조건부로
+        바뀌지 않으므로).
     """
     n = len(agent_ids)
     _banner(f"PHASE 2a - DRAFT PLAN (N={n})")
@@ -553,7 +622,7 @@ def phase2_local_plan_n(
     draft_prompts = []
     for aid in agent_ids:
         others = [offers[o] for o in agent_ids if o != aid]
-        draft_prompts.append(_build_draft_prompt_n(offers[aid], others, task))
+        draft_prompts.append(_build_draft_prompt_n(offers[aid], others, task, use_offer=use_offer))
 
     with _TPE(max_workers=n) as ex:
         futs = [ex.submit(_p2._vlm_with_retry, img, p, True) for img, p in zip(images, draft_prompts)]
@@ -567,13 +636,21 @@ def phase2_local_plan_n(
         drafts[aid] = _parse_local_plan_n(raw, logp, offers[aid], idx, agent_ids, norm_agent)
     drafts_json = {aid: jdump(_p2.plan_steps_to_dicts(drafts[aid].steps)) for aid in agent_ids}
 
-    # ── Round B: COORDINATE (다른 N-1명의 전체 draft plan을 broadcast 받아서 확정) ──
+    if not use_offer:
+        print("  [ABLATION] w/o Offer: Offer Exchange disabled for the DRAFT round — "
+              "each agent drafted with zero knowledge of other agents (own capabilities "
+              "still known). Draft Plan Exchange in COORDINATE below is unaffected.")
+
+    # ── Round B: COORDINATE (다른 N-1명의 전체 draft plan을 broadcast 받아서 확정,
+    #             use_offer와 무관하게 항상 동일하게 수행) ──────────────────────
     _banner(f"PHASE 2b - COORDINATE (broadcast full drafts, N={n})")
     coord_prompts = []
     for aid in agent_ids:
         others = [offers[o] for o in agent_ids if o != aid]
         coord_prompts.append(
-            _build_coordinate_prompt_n(offers[aid], drafts_json[aid], others, drafts_json, task)
+            _build_coordinate_prompt_n(
+                offers[aid], drafts_json[aid], others, drafts_json, task, use_offer=use_offer,
+            )
         )
 
     with _TPE(max_workers=n) as ex:
@@ -587,11 +664,9 @@ def phase2_local_plan_n(
             _log(f"{aid} COORD RAW", raw)
         plans[aid] = _parse_local_plan_n(raw, logp, offers[aid], idx, agent_ids, norm_agent)
 
-    if use_offer:
-        plans = _ensure_pass_n(plans, offers, agent_ids)
-    else:
-        print("  [ABLATION] w/o Offer: rule-based PASS sync skipped "
-              "(using VLM-authored PASS/receive as-is).")
+    # Coordinate는 이제 use_offer와 무관하게 항상 동일하게 동작하므로, 이를
+    # 뒷받침하는 규칙 기반 PASS 보정도 조건 없이 항상 실행한다.
+    plans = _ensure_pass_n(plans, offers, agent_ids)
 
     for aid in agent_ids:
         lp = plans[aid]
@@ -643,28 +718,71 @@ def _filter_spurious_observability(
     return [c for c in conflicts if not _is_spurious(c)]
 
 
+def _detect_conflicts_worker(
+    task: Tuple[str, str, LocalPlan, LocalPlan, Offer, Offer],
+) -> Tuple[str, str, List[ConflictEntry], int]:
+    """Process-pool worker: 정확히 한 agent pair의 conflict만 계산한다.
+
+    이 함수는 module-level에 정의되어 있어야 pickling이 가능하다(멀티프로세싱
+    요구사항). 입력으로 받는 것은 해당 pair 두 agent의 plan/offer뿐이며, 다른
+    pair의 상태나 전역 변수에는 접근하지 않는다 — 즉 "이 프로세스가 이 pair에
+    대해 아는 것은 이 pair의 로컬 정보뿐"이라는 decentralization 전제를 실행
+    수준에서도 그대로 지킨다.
+
+    반환값에 os.getpid()를 포함시키는 이유는 "실제로 서로 다른 프로세스에서
+    계산되었다"는 것을 로그로도 검증 가능하게 하기 위함이다 — 이 pid는 반드시
+    워커 내부(자식 프로세스)에서 읽어야 하며, 메인 프로세스에서 읽으면 항상
+    메인 프로세스의 pid만 찍혀 실제 분산 여부를 검증할 수 없다.
+    """
+    a, b, plan_a, plan_b, offer_a, offer_b = task
+    pair_conflicts = _p2.detect_conflicts(plan_a, plan_b, offer_a, offer_b)
+    pair_conflicts = _remap_conflict_labels(pair_conflicts, a, b)
+    pair_conflicts = _filter_spurious_observability(pair_conflicts, {a: plan_a, b: plan_b})
+    return a, b, pair_conflicts, os.getpid()
+
+
 def phase3_conflict_detection_n(
     plans: Dict[str, LocalPlan], offers: Dict[str, Offer], agent_ids: List[str], verbose: str = "full",
 ) -> Tuple[List[ConflictEntry], Dict[Tuple[str, str], List[ConflictEntry]]]:
     _banner(f"PHASE 3 - CONFLICT DETECTION (decentralized, {len(agent_ids)} agents)")
 
+    pairs = list(combinations(agent_ids, 2))
+    tasks = [(a, b, plans[a], plans[b], offers[a], offers[b]) for a, b in pairs]
+
+    # 각 pair의 detect_conflicts() 호출을 별도 OS 프로세스로 실제 분산 실행한다.
+    # ThreadPoolExecutor(GIL로 인해 사실상 순차 실행)가 아니라 ProcessPoolExecutor를
+    # 쓰는 이유는, "이 계산이 원리적으로 로컬화 가능하다"는 주장을 넘어 "실제로
+    # 서로 다른 실행 컨텍스트에서 독립적으로 계산되었다"는 것까지 코드로 보장하기
+    # 위함이다. 워커 프로세스는 해당 pair의 plan/offer만 전달받으며, 다른 pair의
+    # 결과나 전역 상태를 참조하지 않는다.
+    n_workers = min(len(tasks), os.cpu_count() or 1) if tasks else 1
+
     all_conflicts: List[ConflictEntry] = []
     by_pair: Dict[Tuple[str, str], List[ConflictEntry]] = {}
 
-    for a, b in combinations(agent_ids, 2):
-        pair_conflicts = _p2.detect_conflicts(plans[a], plans[b], offers[a], offers[b])
-        pair_conflicts = _remap_conflict_labels(pair_conflicts, a, b)
-        pair_conflicts = _filter_spurious_observability(pair_conflicts, plans)
+    if tasks:
+        with _PPE(max_workers=n_workers) as ex:
+            results = list(ex.map(_detect_conflicts_worker, tasks))
+    else:
+        results = []
+
+    # 프로세스 풀 결과 취합 및 출력은 메인 프로세스에서 순서대로 수행한다
+    # (자식 프로세스의 print는 순서가 보장되지 않으므로 워커 내부에서는 하지 않는다).
+    # pid는 각 워커가 자기 자신을 기록한 값을 그대로 전달받은 것이다.
+    worker_pids: Set[int] = set()
+    for a, b, pair_conflicts, worker_pid in results:
+        worker_pids.add(worker_pid)
         if pair_conflicts:
             by_pair[(a, b)] = pair_conflicts
             all_conflicts.extend(pair_conflicts)
-            print(f"  [{a} <-> {b}] {len(pair_conflicts)} conflict(s)")
+            print(f"  [{a} <-> {b}] {len(pair_conflicts)} conflict(s)  (worker pid={worker_pid})")
         elif verbose == "full":
-            print(f"  [{a} <-> {b}] no conflicts")
+            print(f"  [{a} <-> {b}] no conflicts  (worker pid={worker_pid})")
 
     n_total_pairs = len(agent_ids) * (len(agent_ids) - 1) // 2
     print(f"\n  Total conflicts: {len(all_conflicts)} across "
-          f"{len(by_pair)}/{n_total_pairs} pair(s)")
+          f"{len(by_pair)}/{n_total_pairs} pair(s)  |  "
+          f"workers={n_workers} (distinct worker pids used: {len(worker_pids)})")
     return all_conflicts, by_pair
 
 
