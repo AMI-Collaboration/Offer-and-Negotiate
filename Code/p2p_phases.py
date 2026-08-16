@@ -334,44 +334,66 @@ KEY: "carry X to doorway" → PASS | "notify agent_B" → INFORM | all others �
 
 
 def _build_phase2_prompt(my: Offer, other: Offer, task: str, use_offer: bool) -> str:
-    if use_offer:
-        passable = [p for p in my.can_provide if _is_passable(p)]
-        ctx = f"""YOUR OFFER:
+    """use_offer=False("w/o Offer" ablation)는 Offer Exchange만 격리해서 끈다
+    (Method 3.1.1 전용). 자기 자신의 Offer(can_provide/need_from_other)는
+    "선언/교환"이 아니라 자기 능력에 대한 자기 인식이므로 계속 안다. 다른
+    agent에 대한 정보(존재, 방, 능력)만 모른다 — Offer를 서로 교환하지
+    않았으므로. coordinate()의 Draft Plan Exchange(Method 3.1.2)는 이
+    플래그와 무관하게 항상 그대로 일어난다.
+    """
+    passable = [p for p in my.can_provide if _is_passable(p)]
+    my_offer_ctx = f"""YOUR OFFER:
 - room: {my.room_type} ({my.agent_id})
 - can_provide (items to PASS): {json.dumps(passable, ensure_ascii=False)}
-- need_from_other: {json.dumps(my.need_from_other, ensure_ascii=False)}
+- need_from_other: {json.dumps(my.need_from_other, ensure_ascii=False)}"""
+
+    if use_offer:
+        ctx = f"""{my_offer_ctx}
 
 OTHER AGENT ({other.room_type}, {other.agent_id}):
 - can_provide: {json.dumps(other.can_provide, ensure_ascii=False)}
 - need_from_other: {json.dumps(other.need_from_other, ensure_ascii=False)}"""
-    else:
-        ctx = f"YOUR ROOM: {my.room_type}\nOTHER ROOM: {other.room_type}"
-
-    return f"""You are the {my.room_type} agent ({my.agent_id}).
-Global task: "{task}"
-
-{ctx}
-
+        collab_steps = """2. What can you prepare for the other agent (see can_provide above)?
+3. What do you need from the other agent (see need_from_other above)?"""
+        handoff_rules = f"""
 {_P2_EXAMPLE}
 
 {_P2_HANDOFF_RULES}
-
-Generate YOUR local plan. Think step by step:
-1. What does the global task require from YOUR room specifically?
-2. What can you prepare for the other agent (see can_provide above)?
-3. What do you need from the other agent (see need_from_other above)?
-
-PLANNING RULES:
-1. Steps ONLY in your room ({my.room_type}), using ONLY visible objects.
-2. Generate 4–6 steps over 0–25 minutes. NO repeated actions.
-3. Prioritize actions that DIRECTLY contribute to the global task.
-4. HANDOFF — if can_provide is NOT empty:
+"""
+        planning_45 = """4. HANDOFF — if can_provide is NOT empty:
    - Prepare the item first (1–2 prep steps)
    - Then add ONE PASS step: "carry [item] to [room] doorway for [other_agent] pickup"
    - PASS step must have depends_on=[prep step ids]
 5. INFORM — if you want to notify completion:
    - "notify [other_agent]: [what is ready]"
-   - handoff_type="INFORM", target_agent=[other_agent]
+   - handoff_type="INFORM", target_agent=[other_agent]"""
+    else:
+        # Offer Exchange 비활성화: 다른 agent에 대한 정보(존재/방/능력)는 모르지만,
+        # 자기 자신의 능력은 그대로 안다.
+        ctx = f"""{my_offer_ctx}
+
+OTHER AGENT: no information shared (Offer Exchange disabled). You do not know
+where they are or what they can do — even though you know your OWN capabilities above."""
+        collab_steps = ("2. You have NO information about the other agent (no Offer was exchanged). "
+                         "Do not add a PASS or INFORM step — you have no valid target_agent to send it to.")
+        handoff_rules = ""
+        planning_45 = ("4. Do NOT set handoff_type or target_agent — leave them null. You cannot "
+                        "coordinate a handoff without knowing who else exists.")
+
+    return f"""You are the {my.room_type} agent ({my.agent_id}).
+Global task: "{task}"
+
+{ctx}
+{handoff_rules}
+Generate YOUR local plan. Think step by step:
+1. What does the global task require from YOUR room specifically?
+{collab_steps}
+
+PLANNING RULES:
+1. Steps ONLY in your room ({my.room_type}), using ONLY visible objects.
+2. Generate 4–6 steps over 0–25 minutes. NO repeated actions.
+3. Prioritize actions that DIRECTLY contribute to the global task.
+{planning_45}
 6. Return ONLY valid JSON inside <JSON> tags.
 
 <JSON>
@@ -1840,12 +1862,12 @@ def format_joint_plan(plan: List[Dict], task: str = "") -> str:
 from concurrent.futures import ThreadPoolExecutor as _TPE
 
 
-def observe_and_draft(img_a: str, img_b: str, task: str, verbose: str = "full"):
+def observe_and_draft(img_a: str, img_b: str, task: str, use_offer: bool = True, verbose: str = "full"):
     """OBSERVATION: offer + draft plan → (offer_a, offer_b, draft_a, draft_b)"""
     offer_a, offer_b = phase1_offer(img_a, img_b, task, verbose=verbose)
     _banner("OBSERVATION — DRAFT PLAN")
-    prompt_a = _build_phase2_prompt(offer_a, offer_b, task, use_offer=True)
-    prompt_b = _build_phase2_prompt(offer_b, offer_a, task, use_offer=True)
+    prompt_a = _build_phase2_prompt(offer_a, offer_b, task, use_offer=use_offer)
+    prompt_b = _build_phase2_prompt(offer_b, offer_a, task, use_offer=use_offer)
     with _TPE(max_workers=2) as ex:
         fut_a = ex.submit(_vlm_with_retry, img_a, prompt_a, True)
         fut_b = ex.submit(_vlm_with_retry, img_b, prompt_b, True)
@@ -1872,6 +1894,10 @@ def coordinate(
     draft_b_json = jdump(plan_steps_to_dicts(draft_b.steps))
 
     def _build_coord_prompt(my, other, my_draft, other_draft):
+        # Coordinate(Draft Plan Exchange, Method 3.1.2)는 use_offer(Offer
+        # Exchange, Method 3.1.1) ablation과 무관하게 항상 동일하게 동작한다 —
+        # 서로 다른 두 exchange 이벤트를 분리해서 Offer Exchange만의 기여도를
+        # 측정하기 위함이다.
         passable = [p for p in my.can_provide if _is_passable(p)]
         return f"""You are the {my.room_type} agent ({my.agent_id}).
 Global task: "{task}"
@@ -1916,9 +1942,14 @@ Produce your FINAL local plan. Refine your draft:
         _log("A COORD RAW", raw_a); _log("B COORD RAW", raw_b)
     plan_a = _parse_local_plan(raw_a, logp_a, offer_a, step_offset=0)
     plan_b = _parse_local_plan(raw_b, logp_b, offer_b, step_offset=AGENT_B_STEP_OFFSET)
-    if use_offer:
-        _banner("HANDOFF SYNC — PASS COORDINATION")
-        plan_a, plan_b = _ensure_pass(plan_a, plan_b, offer_a, offer_b)
+    # Coordinate가 이제 use_offer와 무관하게 항상 동일하게 동작하므로, 이를
+    # 뒷받침하는 규칙 기반 PASS 보정도 조건 없이 항상 실행한다.
+    _banner("HANDOFF SYNC — PASS COORDINATION")
+    plan_a, plan_b = _ensure_pass(plan_a, plan_b, offer_a, offer_b)
+    if not use_offer:
+        print("  [ABLATION] w/o Offer: Offer Exchange was disabled during the DRAFT round "
+              "(each agent drafted with zero knowledge of the other). Draft Plan Exchange "
+              "here in COORDINATE is unaffected and ran normally.")
     if verbose in ("full", "summary"):
         _log("LOCAL PLAN A", jdump(local_plan_to_dict(plan_a)))
         _log("LOCAL PLAN B", jdump(local_plan_to_dict(plan_b)))
